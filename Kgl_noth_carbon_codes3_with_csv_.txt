@@ -1,0 +1,570 @@
+/*
+===============================================================================
+Enhanced Forest Degradation and Carbon Sink Accounting Using Google Earth Engine
+Case Study: Mount Kigali Forest, Nyarugenege District, Rwanda
+TEMPORAL ANALYSIS (2015-2024) - All Years Coverage
+===============================================================================
+*/
+
+// ============================================================================
+// STUDY AREA DEFINITION - MOUNT KIGALI FOREST
+// ============================================================================
+
+// Define Mount Kigali Forest boundary (Nyarugenege District, Rwanda)
+var mountKigali = ee.Geometry.Rectangle([
+  30.0, -1.95,   // Southwest corner
+  30.15, -1.85   // Northeast corner
+]);
+
+// Center the map on Mount Kigali
+Map.centerObject(mountKigali, 12);
+Map.addLayer(mountKigali, {color: 'red'}, 'Study Area - Mount Kigali Forest', true);
+
+// ============================================================================
+// EXTENDED TIME PERIODS FOR COMPREHENSIVE ANALYSIS
+// ============================================================================
+
+var timePeriods = {
+  'Year_2015': {start: '2015-01-01', end: '2015-12-31', label: '2015'},
+  'Year_2016': {start: '2016-01-01', end: '2016-12-31', label: '2016'},
+  'Year_2017': {start: '2017-01-01', end: '2017-12-31', label: '2017'},
+  'Year_2018': {start: '2018-01-01', end: '2018-12-31', label: '2018'},
+  'Year_2019': {start: '2019-01-01', end: '2019-12-31', label: '2019'},
+  'Year_2020': {start: '2020-01-01', end: '2020-12-31', label: '2020'},
+  'Year_2021': {start: '2021-01-01', end: '2021-12-31', label: '2021'},
+  'Year_2022': {start: '2022-01-01', end: '2022-12-31', label: '2022'},
+  'Year_2023': {start: '2023-01-01', end: '2023-12-31', label: '2023'},
+  'Year_2024': {start: '2024-01-01', end: '2024-12-31', label: '2024'}
+};
+
+print('Starting Enhanced Temporal Analysis (2015-2024)...');
+print('Processing 10 individual years for comprehensive change detection');
+
+// ============================================================================
+// ENHANCED LANDSAT DATA PROCESSING FUNCTIONS
+// ============================================================================
+
+// Function to mask clouds and apply scaling factors
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+  
+  // Apply scaling factors for Landsat 8/9
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBands, null, true)
+              .updateMask(qaMask)
+              .updateMask(saturationMask);
+}
+
+// Function to calculate comprehensive vegetation indices
+function addVegetationIndices(image) {
+  // NDVI (Normalized Difference Vegetation Index)
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  
+  // EVI (Enhanced Vegetation Index)
+  var evi = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+      'NIR': image.select('SR_B5'),
+      'RED': image.select('SR_B4'),
+      'BLUE': image.select('SR_B2')
+    }).rename('EVI');
+  
+  // SAVI (Soil Adjusted Vegetation Index)
+  var savi = image.expression(
+    '((NIR - RED) / (NIR + RED + 0.5)) * (1 + 0.5)', {
+      'NIR': image.select('SR_B5'),
+      'RED': image.select('SR_B4')
+    }).rename('SAVI');
+  
+  // MSAVI (Modified Soil Adjusted Vegetation Index)
+  var msavi = image.expression(
+    '(2 * NIR + 1 - sqrt(pow((2 * NIR + 1), 2) - 8 * (NIR - RED))) / 2', {
+      'NIR': image.select('SR_B5'),
+      'RED': image.select('SR_B4')
+    }).rename('MSAVI');
+  
+  // NDWI (Normalized Difference Water Index) - FIXED
+  var ndwi = image.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+  
+  // NDBI (Normalized Difference Built-up Index) - FIXED
+  var ndbi = image.normalizedDifference(['SR_B6', 'SR_B5']).rename('NDBI');
+  
+  return image.addBands([ndvi, evi, savi, msavi, ndwi, ndbi]);
+}
+
+// Function to get Landsat composite for a specific year
+function getLandsatComposite(startDate, endDate) {
+  var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterDate(startDate, endDate)
+    .filterBounds(mountKigali)
+    .filter(ee.Filter.lt('CLOUD_COVER', 30));
+    
+  var l9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+    .filterDate(startDate, endDate)
+    .filterBounds(mountKigali)
+    .filter(ee.Filter.lt('CLOUD_COVER', 30));
+  
+  var combined = l8.merge(l9);
+  
+  return combined
+    .map(maskL8sr)
+    .map(addVegetationIndices)
+    .median()
+    .clip(mountKigali);
+}
+
+// ============================================================================
+// LAND COVER CLASSIFICATION FUNCTION
+// ============================================================================
+
+function classifyLandCover(image) {
+  // Water (NDWI > 0.3)
+  var water = image.select('NDWI').gt(0.3);
+  
+  // Built-up areas (NDBI > 0.1 and NDVI < 0.2)
+  var builtUp = image.select('NDBI').gt(0.1).and(image.select('NDVI').lt(0.2));
+  
+  // Dense natural forest (NDVI > 0.7 and EVI > 0.5)
+  var denseForest = image.select('NDVI').gt(0.7).and(image.select('EVI').gt(0.5));
+  
+  // Plantation forest (NDVI > 0.6 and NDVI <= 0.7, uniform texture)
+  var plantation = image.select('NDVI').gt(0.6).and(image.select('NDVI').lte(0.7))
+    .and(denseForest.not());
+  
+  // Mixed farmland with trees (NDVI > 0.4 and NDVI <= 0.6)
+  var mixedFarmland = image.select('NDVI').gt(0.4).and(image.select('NDVI').lte(0.6))
+    .and(plantation.not()).and(denseForest.not());
+  
+  // Savanna/grassland (NDVI > 0.2 and NDVI <= 0.4)
+  var savanna = image.select('NDVI').gt(0.2).and(image.select('NDVI').lte(0.4))
+    .and(mixedFarmland.not()).and(plantation.not()).and(denseForest.not());
+  
+  // Cropland (SAVI > 0.3 and not forest)
+  var cropland = image.select('SAVI').gt(0.3).and(image.select('NDVI').gt(0.15))
+    .and(denseForest.not()).and(plantation.not()).and(mixedFarmland.not());
+  
+  // Degraded areas (NDVI <= 0.2)
+  var degraded = image.select('NDVI').lte(0.2).and(water.not()).and(builtUp.not());
+  
+  // Create classified image (8 classes matching your research)
+  var classified = ee.Image(0)
+    .where(water, 1)           // Water
+    .where(degraded, 2)        // Degraded areas
+    .where(builtUp, 3)         // Built-up
+    .where(cropland, 4)        // Cropland
+    .where(savanna, 5)         // Savanna/grassland
+    .where(mixedFarmland, 6)   // Mixed farmland with trees
+    .where(plantation, 7)      // Plantation forest
+    .where(denseForest, 8)     // Dense natural forest
+    .rename('Land_Cover');
+  
+  return classified;
+}
+
+// ============================================================================
+// FOREST COVER AND CARBON ANALYSIS FUNCTIONS
+// ============================================================================
+
+// Function to create comprehensive forest cover map
+function createForestCoverMap(image, threshold) {
+  threshold = threshold || 0.4;
+  var forestCover = image.select('NDVI').gt(threshold).rename('Forest_Cover');
+  
+  // Create forest type classification
+  var denseForest = image.select('NDVI').gt(0.7).rename('Dense_Forest');
+  var mediumForest = image.select('NDVI').gt(0.5).and(image.select('NDVI').lte(0.7)).rename('Medium_Forest');
+  var sparseForest = image.select('NDVI').gt(0.4).and(image.select('NDVI').lte(0.5)).rename('Sparse_Forest');
+  
+  return ee.Image([forestCover, denseForest, mediumForest, sparseForest]);
+}
+
+// Function to estimate canopy height using regression with vegetation indices
+function estimateCanopyHeight(image) {
+  var ndvi = image.select('NDVI');
+  var evi = image.select('EVI');
+  var savi = image.select('SAVI');
+  
+  // Canopy height estimation for East African forests
+  // Based on LiDAR calibration studies and vegetation indices
+  var canopyHeight = image.expression(
+    '(NDVI > 0.3) ? (25 * pow(NDVI, 1.5) + 15 * EVI + 8 * SAVI + 2) : 0', {
+      'NDVI': ndvi,
+      'EVI': evi,
+      'SAVI': savi
+    }).rename('Canopy_Height');
+  
+  // Mask unrealistic heights and non-forest areas
+  return canopyHeight.updateMask(canopyHeight.gt(1).and(canopyHeight.lt(45)));
+}
+
+// Function to estimate above-ground biomass (enhanced)
+function estimateAGB(image) {
+  var ndvi = image.select('NDVI');
+  var evi = image.select('EVI');
+  var savi = image.select('SAVI');
+  
+  // Enhanced biomass estimation for East African tropical forests
+  // Incorporating multiple vegetation indices and canopy height
+  var canopyHeight = estimateCanopyHeight(image);
+  
+  var agb = image.expression(
+    '(NDVI > 0.2) ? (200 * pow(NDVI, 1.8) + 80 * EVI + 45 * SAVI + 0.8 * CH + 20) : 0', {
+      'NDVI': ndvi,
+      'EVI': evi,
+      'SAVI': savi,
+      'CH': canopyHeight
+    }).rename('AGB');
+  
+  return agb.updateMask(agb.gt(5).and(agb.lt(600)));
+}
+
+// Function to convert biomass to comprehensive carbon stocks
+function biomassToCarbon(agbImage) {
+  var carbonFraction = 0.47; // IPCC default for tropical forests
+  var rootShootRatio = 0.24; // IPCC default for tropical forests
+  
+  // Above-ground carbon
+  var agc = agbImage.multiply(carbonFraction).rename('AGC');
+  
+  // Below-ground carbon  
+  var bgc = agc.multiply(rootShootRatio).rename('BGC');
+  
+  // Total biomass carbon
+  var totalBiomassCarbon = agc.add(bgc).rename('Total_Biomass_Carbon');
+  
+  // Soil organic carbon (estimated based on forest type and climate)
+  var soc = agbImage.expression(
+    'AGB > 100 ? 80 : (AGB > 50 ? 60 : (AGB > 20 ? 40 : 25))', {
+      'AGB': agbImage
+    }).rename('SOC');
+  
+  // Total ecosystem carbon
+  var totalCarbon = totalBiomassCarbon.add(soc).rename('Total_Carbon');
+  
+  return ee.Image([agc, bgc, totalBiomassCarbon, soc, totalCarbon]);
+}
+
+// ============================================================================
+// ENHANCED COLOR PALETTES AND VISUALIZATION
+// ============================================================================
+
+var palettes = {
+  // Land cover classes (8 classes)
+  landcover: ['#419bdf', '#8B4513', '#808080', '#FFD700', '#90EE90', '#98FB98', '#228B22', '#006400'],
+  
+  // Forest analysis
+  forest: ['#ffffe5', '#d9f0a3', '#addd8e', '#78c679', '#41ab5d', '#238443', '#005a32'],
+  ndvi: ['#d73027', '#f46d43', '#fdae61', '#fee08b', '#d9ef8b', '#a6d96a', '#66bd63', '#1a9850'],
+  biomass: ['#fff7f3', '#fde0dd', '#fcc5c0', '#fa9fb5', '#f768a1', '#dd3497', '#ae017e', '#7a0177'],
+  carbon: ['#f7fcf0', '#e0f3db', '#ccebc5', '#a8ddb5', '#7bccc4', '#4eb3d3', '#2b8cbe', '#08589e'],
+  canopy: ['#ffffd9', '#edf8b1', '#c7e9b4', '#7fcdbb', '#41b6c4', '#1d91c0', '#225ea8', '#0c2c84'],
+  change: ['#d73027', '#f46d43', '#fdae61', '#fee090', '#ffffbf', '#e0f3f8', '#abd9e9', '#74add1', '#4575b4'],
+  fragmentation: ['#006837', '#31a354', '#78c679', '#c2e699', '#ffffcc', '#fec44f', '#fe9929', '#ec7014', '#cc4c02']
+};
+
+var visParams = {
+  landcover: {min: 1, max: 8, palette: palettes.landcover},
+  forest: {min: 0, max: 1, palette: palettes.forest},
+  ndvi: {min: -0.2, max: 0.8, palette: palettes.ndvi},
+  biomass: {min: 0, max: 400, palette: palettes.biomass},
+  carbon: {min: 0, max: 200, palette: palettes.carbon},
+  canopy: {min: 0, max: 35, palette: palettes.canopy},
+  change: {min: -0.5, max: 0.5, palette: palettes.change},
+  fragmentation: {min: 0, max: 1, palette: palettes.fragmentation}
+};
+
+// ============================================================================
+// MAIN COMPREHENSIVE ANALYSIS WORKFLOW
+// ============================================================================
+
+// Storage for all results
+var analysisResults = {
+  composites: {},
+  forestCover: {},
+  landCover: {},
+  biomass: {},
+  carbon: {},
+  canopyHeight: {}
+};
+
+print('Processing individual years for temporal analysis...');
+
+// Process each year individually
+Object.keys(timePeriods).forEach(function(periodKey) {
+  var period = timePeriods[periodKey];
+  
+  print('Processing ' + period.label + '...');
+  
+  // Get Landsat composite for the year
+  var composite = getLandsatComposite(period.start, period.end);
+  analysisResults.composites[periodKey] = composite;
+  
+  // Create comprehensive forest cover maps
+  var forestMaps = createForestCoverMap(composite);
+  analysisResults.forestCover[periodKey] = forestMaps;
+  
+  // Create land cover classification
+  var landCover = classifyLandCover(composite);
+  analysisResults.landCover[periodKey] = landCover;
+  
+  // Estimate canopy height
+  var canopyHeight = estimateCanopyHeight(composite);
+  analysisResults.canopyHeight[periodKey] = canopyHeight;
+  
+  // Estimate biomass and carbon
+  var biomass = estimateAGB(composite);
+  analysisResults.biomass[periodKey] = biomass;
+  
+  var carbon = biomassToCarbon(biomass);
+  analysisResults.carbon[periodKey] = carbon;
+  
+  // Add layers to map (hidden by default for performance)
+  Map.addLayer(composite, {bands: ['SR_B4', 'SR_B3', 'SR_B2'], min: 0, max: 0.3}, 
+               'RGB ' + period.label, false);
+  Map.addLayer(composite.select('NDVI'), visParams.ndvi, 
+               'NDVI ' + period.label, false);
+  Map.addLayer(landCover, visParams.landcover, 
+               'Land Cover ' + period.label, false);
+  Map.addLayer(forestMaps.select('Forest_Cover'), visParams.forest, 
+               'Forest Cover ' + period.label, false);
+  Map.addLayer(canopyHeight, visParams.canopy, 
+               'Canopy Height ' + period.label, false);
+  Map.addLayer(carbon.select('Total_Carbon'), visParams.carbon, 
+               'Total Carbon ' + period.label, false);
+});
+
+// ============================================================================
+// TEMPORAL CHANGE DETECTION ANALYSIS
+// ============================================================================
+
+print('Calculating comprehensive temporal changes (2015-2024)...');
+
+// Get first and last years for change analysis
+var firstYear = 'Year_2015';
+var lastYear = 'Year_2024';
+
+// Forest change analysis
+var firstForest = analysisResults.forestCover[firstYear].select('Forest_Cover');
+var lastForest = analysisResults.forestCover[lastYear].select('Forest_Cover');
+var forestChange = lastForest.subtract(firstForest).rename('Forest_Change_2015_2024');
+
+// Land cover change analysis
+var firstLC = analysisResults.landCover[firstYear];
+var lastLC = analysisResults.landCover[lastYear];
+var lcChange = lastLC.subtract(firstLC).rename('LC_Change_2015_2024');
+
+// Carbon change analysis
+var firstCarbon = analysisResults.carbon[firstYear].select('Total_Carbon');
+var lastCarbon = analysisResults.carbon[lastYear].select('Total_Carbon');
+var carbonChange = lastCarbon.subtract(firstCarbon).rename('Carbon_Change_2015_2024');
+
+// Canopy height change analysis
+var firstCanopy = analysisResults.canopyHeight[firstYear];
+var lastCanopy = analysisResults.canopyHeight[lastYear];
+var canopyChange = lastCanopy.subtract(firstCanopy).rename('Canopy_Change_2015_2024');
+
+// NDVI change analysis
+var firstNDVI = analysisResults.composites[firstYear].select('NDVI');
+var lastNDVI = analysisResults.composites[lastYear].select('NDVI');
+var ndviChange = lastNDVI.subtract(firstNDVI).rename('NDVI_Change_2015_2024');
+
+// Degradation hotspots (areas with significant loss)
+var degradationHotspots = forestChange.lt(-0.3).rename('Degradation_Hotspots');
+
+// Add change layers to map
+Map.addLayer(forestChange, visParams.change, 'Forest Change (2015-2024)', false);
+Map.addLayer(carbonChange, {min: -50, max: 50, palette: palettes.change}, 
+             'Carbon Change (2015-2024)', false);
+Map.addLayer(canopyChange, {min: -10, max: 10, palette: palettes.change}, 
+             'Canopy Height Change (2015-2024)', false);
+Map.addLayer(degradationHotspots, {palette: ['green', 'red']}, 
+             'Degradation Hotspots', true);
+
+// ============================================================================
+// FRAGMENTATION ANALYSIS WITH TEMPORAL COMPARISON
+// ============================================================================
+
+print('Calculating fragmentation analysis...');
+
+// Function to calculate fragmentation metrics (corrected)
+function calculateFragmentation(forestImage) {
+  var forest = forestImage.gt(0);
+  
+  // Patch density using focal mean
+  var patchDensity = forest.focal_mean(ee.Kernel.circle(3), 'pixels').rename('Patch_Density');
+  
+  // Edge density using edge detection
+  var kernel = ee.Kernel.laplacian8(1, false);
+  var edges = forest.convolve(kernel).abs().rename('Edges');
+  var edgeDensity = edges.focal_mean(ee.Kernel.circle(2), 'pixels').rename('Edge_Density');
+  
+  // Connectivity
+  var connectivity = forest.focal_mean(ee.Kernel.circle(5), 'pixels').rename('Connectivity');
+  
+  return ee.Image([patchDensity, edgeDensity, connectivity]);
+}
+
+// Calculate fragmentation for 2015 and 2024
+var fragmentation2015 = calculateFragmentation(analysisResults.forestCover[firstYear].select('Forest_Cover'));
+var fragmentation2024 = calculateFragmentation(analysisResults.forestCover[lastYear].select('Forest_Cover'));
+
+// Fragmentation change
+var fragmentationChange = fragmentation2024.subtract(fragmentation2015);
+
+Map.addLayer(fragmentation2015.select('Connectivity'), visParams.fragmentation, 
+             'Forest Connectivity 2015', false);
+Map.addLayer(fragmentation2024.select('Connectivity'), visParams.fragmentation, 
+             'Forest Connectivity 2024', false);
+Map.addLayer(fragmentationChange.select('Edge_Density'), 
+             {min: -0.5, max: 0.5, palette: palettes.change}, 
+             'Edge Density Change (2015-2024)', false);
+
+// ============================================================================
+// COMPREHENSIVE EXPORT FUNCTIONS
+// ============================================================================
+
+function exportImageToDrive(image, description, folder) {
+  Export.image.toDrive({
+    image: image,
+    description: description,
+    folder: folder,
+    scale: 30,
+    region: mountKigali,
+    maxPixels: 1e9,
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF'
+  });
+  print('✓ Export task created: ' + description);
+}
+
+function exportVisualizedToDrive(image, palette, min, max, description, folder) {
+  var visualized = image.visualize({
+    min: min,
+    max: max,
+    palette: palette
+  });
+  
+  Export.image.toDrive({
+    image: visualized,
+    description: description + '_Visual',
+    folder: folder,
+    scale: 30,
+    region: mountKigali,
+    maxPixels: 1e9,
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF'
+  });
+  print('✓ Visual export task created: ' + description + '_Visual');
+}
+
+// ============================================================================
+// COMPREHENSIVE EXPORT WORKFLOW
+// ============================================================================
+
+print('\n=== CREATING COMPREHENSIVE EXPORT TASKS ===');
+
+// Export data for each year
+Object.keys(timePeriods).forEach(function(periodKey) {
+  var period = timePeriods[periodKey];
+  
+  // 1. Forest cover maps (all types)
+  exportImageToDrive(analysisResults.forestCover[periodKey].select('Forest_Cover'), 
+                     'Forest_Cover_' + period.label, 'Mount_Kigali_Forest_Data');
+  exportImageToDrive(analysisResults.forestCover[periodKey].select('Dense_Forest'), 
+                     'Dense_Forest_' + period.label, 'Mount_Kigali_Forest_Data');
+  exportImageToDrive(analysisResults.forestCover[periodKey].select('Medium_Forest'), 
+                     'Medium_Forest_' + period.label, 'Mount_Kigali_Forest_Data');
+  exportImageToDrive(analysisResults.forestCover[periodKey].select('Sparse_Forest'), 
+                     'Sparse_Forest_' + period.label, 'Mount_Kigali_Forest_Data');
+  
+  // 2. Land cover classification
+  exportImageToDrive(analysisResults.landCover[periodKey], 
+                     'Land_Cover_' + period.label, 'Mount_Kigali_LandCover_Data');
+  
+  // 3. Canopy height maps
+  exportImageToDrive(analysisResults.canopyHeight[periodKey], 
+                     'Canopy_Height_' + period.label, 'Mount_Kigali_Canopy_Data');
+  
+  // 4. Carbon stock maps (all components)
+  exportImageToDrive(analysisResults.carbon[periodKey].select('Total_Carbon'), 
+                     'Total_Carbon_' + period.label, 'Mount_Kigali_Carbon_Data');
+  exportImageToDrive(analysisResults.carbon[periodKey].select('AGC'), 
+                     'Above_Ground_Carbon_' + period.label, 'Mount_Kigali_Carbon_Data');
+  exportImageToDrive(analysisResults.carbon[periodKey].select('BGC'), 
+                     'Below_Ground_Carbon_' + period.label, 'Mount_Kigali_Carbon_Data');
+  exportImageToDrive(analysisResults.carbon[periodKey].select('SOC'), 
+                     'Soil_Organic_Carbon_' + period.label, 'Mount_Kigali_Carbon_Data');
+  
+  // 5. Biomass maps
+  exportImageToDrive(analysisResults.biomass[periodKey], 
+                     'Above_Ground_Biomass_' + period.label, 'Mount_Kigali_Biomass_Data');
+  
+  // 6. NDVI and vegetation indices
+  exportImageToDrive(analysisResults.composites[periodKey].select('NDVI'), 
+                     'NDVI_' + period.label, 'Mount_Kigali_Vegetation_Data');
+  exportImageToDrive(analysisResults.composites[periodKey].select('EVI'), 
+                     'EVI_' + period.label, 'Mount_Kigali_Vegetation_Data');
+  
+  // 7. RGB composites
+  exportImageToDrive(analysisResults.composites[periodKey].select(['SR_B4', 'SR_B3', 'SR_B2']), 
+                     'RGB_Composite_' + period.label, 'Mount_Kigali_RGB_Data');
+  
+  // Visual exports for presentations
+  exportVisualizedToDrive(analysisResults.forestCover[periodKey].select('Forest_Cover'), 
+                         palettes.forest, 0, 1,
+                         'Forest_Cover_' + period.label, 'Mount_Kigali_Visual');
+  exportVisualizedToDrive(analysisResults.landCover[periodKey], 
+                         palettes.landcover, 1, 8,
+                         'Land_Cover_' + period.label, 'Mount_Kigali_Visual');
+  exportVisualizedToDrive(analysisResults.canopyHeight[periodKey], 
+                         palettes.canopy, 0, 35,
+                         'Canopy_Height_' + period.label, 'Mount_Kigali_Visual');
+  exportVisualizedToDrive(analysisResults.carbon[periodKey].select('Total_Carbon'), 
+                         palettes.carbon, 0, 200,
+                         'Total_Carbon_' + period.label, 'Mount_Kigali_Visual');
+});
+
+// Export change detection results
+exportImageToDrive(forestChange, 'Forest_Change_2015_2024', 'Mount_Kigali_Change_Data');
+exportImageToDrive(lcChange, 'Land_Cover_Change_2015_2024', 'Mount_Kigali_Change_Data');
+exportImageToDrive(carbonChange, 'Carbon_Change_2015_2024', 'Mount_Kigali_Change_Data');
+exportImageToDrive(canopyChange, 'Canopy_Height_Change_2015_2024', 'Mount_Kigali_Change_Data');
+exportImageToDrive(ndviChange, 'NDVI_Change_2015_2024', 'Mount_Kigali_Change_Data');
+exportImageToDrive(degradationHotspots, 'Degradation_Hotspots_2015_2024', 'Mount_Kigali_Change_Data');
+
+// Export fragmentation analysis
+exportImageToDrive(fragmentation2015, 'Fragmentation_Indices_2015', 'Mount_Kigali_Fragmentation_Data');
+exportImageToDrive(fragmentation2024, 'Fragmentation_Indices_2024', 'Mount_Kigali_Fragmentation_Data');
+exportImageToDrive(fragmentationChange, 'Fragmentation_Change_2015_2024', 'Mount_Kigali_Fragmentation_Data');
+
+// ============================================================================
+// CSV DATA EXPORT FOR STATISTICAL ANALYSIS
+// ============================================================================
+
+print('\n=== CREATING CSV DATASETS ===');
+
+// Generate sample points
+var samplePoints = ee.FeatureCollection.randomPoints(mountKigali, 1000, 42);
+
+// Create comprehensive time series dataset
+var timeSeriesImage = ee.Image([]);
+Object.keys(timePeriods).forEach(function(periodKey) {
+  var period = timePeriods[periodKey];
+  var yearData = analysisResults.composites[periodKey].select(['NDVI', 'EVI'])
+    .addBands(analysisResults.forestCover[periodKey].select('Forest_Cover'))
+    .addBands(analysisResults.landCover[periodKey])
+    .addBands(analysisResults.canopyHeight[periodKey])
+    .addBands(analysisResults.carbon[periodKey].select('Total_Carbon'))
+    .addBands(analysisResults.biomass[periodKey])
+    .rename([
+      'NDVI_' + period.label,
+      'EVI_' + period.label,
+      'Forest_' + period.label,
+      'LandCover_' + period.label,
+      'CanopyHeight_' + period.label,
+      'Carbon_' + period.label,
+      'Biomass_' + period.label
+    ]);
